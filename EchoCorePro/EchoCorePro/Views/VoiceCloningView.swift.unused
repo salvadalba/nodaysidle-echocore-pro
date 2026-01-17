@@ -1,0 +1,927 @@
+//
+//  VoiceCloningView.swift
+//  EchoCorePro
+//
+//  Voice cloning interface: record reference audio → clone → synthesize
+//
+
+import AVFoundation
+import SwiftUI
+
+struct VoiceCloningView: View {
+    @StateObject private var recorder = AudioRecorder()
+    @StateObject private var cloningViewModel = VoiceCloningViewModel()
+
+    @State private var synthesizeText = ""
+    @State private var synthesizedAudioURL: URL?
+    @State private var errorMessage: String?
+    @State private var selectedSpeakerId: String?
+
+    // Synthesis settings
+    @State private var selectedLanguage = "en"
+    @State private var speechSpeed: Float = 1.0
+
+    // XTTS v2 by Coqui supports 17 languages with cross-lingual voice cloning
+    // Italian is now supported! 🇮🇹
+    private let languages = [
+        ("en", "English"),  // ✅ XTTS + OpenVoice
+        ("es", "Spanish"),  // ✅ XTTS + OpenVoice
+        ("fr", "French"),  // ✅ XTTS + OpenVoice
+        ("de", "German"),  // ✅ XTTS
+        ("it", "Italian"),  // ✅ XTTS - NEW!
+        ("pt", "Portuguese"),  // ✅ XTTS
+        ("pl", "Polish"),  // ✅ XTTS
+        ("tr", "Turkish"),  // ✅ XTTS
+        ("ru", "Russian"),  // ✅ XTTS
+        ("nl", "Dutch"),  // ✅ XTTS
+        ("cs", "Czech"),  // ✅ XTTS
+        ("ar", "Arabic"),  // ✅ XTTS
+        ("zh", "Chinese"),  // ✅ XTTS + OpenVoice
+        ("ja", "Japanese"),  // ✅ XTTS + OpenVoice
+        ("ko", "Korean"),  // ✅ XTTS + OpenVoice
+        ("hu", "Hungarian"),  // ✅ XTTS
+        ("vi", "Vietnamese"),  // ✅ XTTS
+    ]
+
+    var body: some View {
+        HSplitView {
+            // Left: Recording & Cloning
+            VStack(spacing: 0) {
+                headerBar
+
+                ScrollView {
+                    VStack(spacing: 24) {
+                        // Server status
+                        serverStatusCard
+
+                        // Recording section
+                        recordingSection
+
+                        // Clone button
+                        if recorder.hasRecording && !cloningViewModel.isCloning
+                            && clonedSpeakerId == nil
+                        {
+                            cloneButton
+                        }
+
+                        // Cloning progress
+                        if cloningViewModel.isCloning {
+                            cloningProgress
+                        }
+
+                        // Success message
+                        if let speakerId = clonedSpeakerId, !cloningViewModel.isCloning {
+                            successCard(speakerId: speakerId)
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .frame(minWidth: 400)
+
+            // Right: Synthesis
+            VStack(spacing: 0) {
+                Text("Voice Synthesis")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.ultraThinMaterial)
+
+                ScrollView {
+                    VStack(spacing: 24) {
+                        // Speaker selection
+                        speakerSelector
+
+                        // Text input
+                        synthesisInput
+
+                        // Settings
+                        synthesisSettings
+
+                        // Synthesize button
+                        synthesizeButton
+
+                        // Audio player
+                        if let audioURL = synthesizedAudioURL {
+                            audioPlayer(url: audioURL)
+                        }
+                    }
+                    .padding()
+                }
+            }
+            .frame(minWidth: 350)
+        }
+        .background(
+            LinearGradient(
+                colors: [Color(white: 0.05), Color(white: 0.08), Color(white: 0.05)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .alert(
+            "Error",
+            isPresented: .init(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
+        ) {
+            Button("OK") { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "An error occurred")
+        }
+        .task {
+            await cloningViewModel.checkServerHealth()
+        }
+    }
+
+    // MARK: - Header Bar
+
+    private var headerBar: some View {
+        HStack {
+            Label("Voice Cloning", systemImage: "person.wave.2.fill")
+                .font(.title2)
+                .fontWeight(.semibold)
+
+            Spacer()
+
+            Button {
+                Task { await cloningViewModel.checkServerHealth() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .foregroundStyle(cloningViewModel.isServerHealthy ? .green : .red)
+            }
+            .buttonStyle(.plain)
+            .help("Refresh server status")
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+    }
+
+    // MARK: - Server Status Card
+
+    private var serverStatusCard: some View {
+        HStack {
+            Circle()
+                .fill(cloningViewModel.isServerHealthy ? Color.green : Color.red)
+                .frame(width: 10, height: 10)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("OpenVoice Server")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Text(
+                    cloningViewModel.isServerHealthy
+                        ? "Connected on port 8765" : "Starting server..."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            if !cloningViewModel.isServerHealthy {
+                ProgressView()
+                    .scaleEffect(0.6)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    // MARK: - Recording Section
+
+    private var recordingSection: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Text("Record Reference Audio")
+                    .font(.headline)
+                Text("6+ seconds recommended")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            // Waveform
+            waveformView
+                .frame(height: 80)
+                .padding(.horizontal, 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color(white: 0.1))
+                )
+
+            // Time display
+            Text(formatTime(recorder.recordingTime))
+                .font(.system(size: 32, weight: .ultraLight, design: .monospaced))
+                .foregroundStyle(recorder.isRecording ? .primary : .secondary)
+
+            // Record button
+            Button {
+                Task { await toggleRecording() }
+            } label: {
+                ZStack {
+                    Circle()
+                        .stroke(
+                            LinearGradient(
+                                colors: recorder.isRecording ? [.red, .orange] : [.blue, .purple],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 3
+                        )
+                        .frame(width: 70, height: 70)
+
+                    Circle()
+                        .fill(
+                            recorder.isRecording
+                                ? Color.red
+                                : LinearGradient(
+                                    colors: [.blue, .purple],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                        )
+                        .frame(width: 50, height: 50)
+
+                    Image(systemName: recorder.isRecording ? "stop.fill" : "mic.fill")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(cloningViewModel.isCloning)
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    private var waveformView: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<recorder.audioLevels.count, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(
+                        LinearGradient(
+                            colors: recorder.isRecording
+                                ? [.red, .orange, .yellow]
+                                : [.gray.opacity(0.3), .gray.opacity(0.5)],
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .frame(width: 3, height: max(3, CGFloat(recorder.audioLevels[index]) * 60))
+                    .animation(
+                        .spring(response: 0.1, dampingFraction: 0.6),
+                        value: recorder.audioLevels[index])
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .opacity(recorder.isRecording ? 1 : 0.5)
+    }
+
+    // MARK: - Clone Button
+
+    private var cloneButton: some View {
+        Button {
+            Task {
+                await cloneVoice()
+            }
+        } label: {
+            HStack {
+                Image(systemName: "person.2.fill")
+                Text("Clone My Voice")
+                    .fontWeight(.semibold)
+            }
+            .frame(maxWidth: .infinity)
+            .padding()
+            .background(
+                LinearGradient(
+                    colors: [.blue, .purple],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .foregroundStyle(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Cloning Progress
+
+    private var cloningProgress: some View {
+        HStack {
+            ProgressView()
+                .scaleEffect(0.8)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Cloning Voice...")
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Text("Extracting voice characteristics from reference audio")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.blue.opacity(0.1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(.blue.opacity(0.3), lineWidth: 1)
+                )
+        )
+    }
+
+    // MARK: - Success Card
+
+    private func successCard(speakerId: String) -> some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.title)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Voice Cloned Successfully!")
+                        .font(.headline)
+                    Text("Speaker ID: \(speakerId)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(speakerId, forType: .string)
+                } label: {
+                    Label("Copy ID", systemImage: "doc.on.doc")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button {
+                    Task {
+                        await cloningViewModel.deleteSpeaker(speakerId)
+                        clonedSpeakerId = nil
+                    }
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+
+                Button {
+                    selectedSpeakerId = speakerId
+                } label: {
+                    Label("Use This Voice", systemImage: "arrow.right")
+                        .fontWeight(.semibold)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.green.opacity(0.1))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(.green.opacity(0.3), lineWidth: 1)
+                )
+        )
+    }
+
+    // MARK: - Speaker Selector
+
+    private var speakerSelector: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Cloned Voice")
+                .font(.headline)
+
+            if cloningViewModel.speakers.isEmpty {
+                Text("No voices cloned yet. Record and clone your voice first.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color(white: 0.1))
+                    )
+            } else {
+                Picker("Speaker", selection: $selectedSpeakerId) {
+                    Text("Select a voice...").tag(nil as String?)
+                    ForEach(cloningViewModel.speakers, id: \.self) { speaker in
+                        Text(speaker).tag(speaker as String?)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    // MARK: - Synthesis Input
+
+    private var synthesisInput: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Text to Speak")
+                .font(.headline)
+
+            TextEditor(text: $synthesizeText)
+                .font(.body)
+                .frame(minHeight: 120)
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(white: 0.1))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                )
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    // MARK: - Synthesis Settings
+
+    private var synthesisSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Settings")
+                .font(.headline)
+
+            // Language
+            HStack {
+                Text("Language")
+                    .frame(width: 80, alignment: .leading)
+                Picker("", selection: $selectedLanguage) {
+                    ForEach(languages, id: \.0) { code, name in
+                        Text(name).tag(code)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity)
+            }
+
+            // Speed
+            HStack {
+                Text("Speed")
+                    .frame(width: 80, alignment: .leading)
+
+                Slider(value: $speechSpeed, in: 0.5...2.0)
+                    .tint(.blue)
+
+                Text("\(String(format: "%.1f", speechSpeed))x")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40)
+            }
+
+            Divider().padding(.vertical, 8)
+
+            DisclosureGroup("Advanced Settings") {
+                VStack(spacing: 12) {
+                    // Fine-tuning
+                    Group {
+                        settingSlider(
+                            title: "Temperature", value: $cloningViewModel.temperature,
+                            range: 0.1...2.0, step: 0.05, format: "%.2f")
+                        settingSlider(
+                            title: "Top P", value: $cloningViewModel.topP, range: 0.1...1.0,
+                            step: 0.05, format: "%.2f")
+                        settingSlider(
+                            title: "Repetition", value: $cloningViewModel.repetitionPenalty,
+                            range: 1.0...5.0, step: 0.1, format: "%.1f")
+                        settingSlider(
+                            title: "Min P", value: $cloningViewModel.minP, range: 0.0...1.0,
+                            step: 0.01, format: "%.2f")
+                        settingSlider(
+                            title: "CFG Weight", value: $cloningViewModel.cfgWeight,
+                            range: 0.0...2.0, step: 0.1, format: "%.1f")
+                        settingSlider(
+                            title: "Exaggeration", value: $cloningViewModel.exaggeration,
+                            range: 0.0...1.0, step: 0.05, format: "%.2f")
+                    }
+
+                    Divider()
+
+                    // Smart Chunking
+                    Text("Smart Chunking")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack {
+                        Text("Chunk Size")
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Slider(
+                            value: Binding(
+                                get: { Double(cloningViewModel.chunkSize) },
+                                set: { cloningViewModel.chunkSize = Int($0) }), in: 50...1000,
+                            step: 10)
+                        Text("\(cloningViewModel.chunkSize)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 30)
+                    }
+
+                    settingSlider(
+                        title: "Min Sec", value: $cloningViewModel.minChunkSeconds,
+                        range: 0.5...10.0, step: 0.5, format: "%.1f s")
+
+                    HStack {
+                        Text("Retries")
+                            .font(.caption)
+                            .frame(width: 80, alignment: .leading)
+                        Stepper(
+                            "\(cloningViewModel.chunkRetries)",
+                            value: $cloningViewModel.chunkRetries, in: 0...5)
+                    }
+                }
+                .padding(.top, 8)
+            }
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    private func settingSlider(
+        title: String, value: Binding<Float>, range: ClosedRange<Float>, step: Float, format: String
+    ) -> some View {
+        HStack {
+            Text(title)
+                .font(.caption)
+                .frame(width: 80, alignment: .leading)
+            Slider(value: value, in: range, step: Double(step))
+            Text(String(format: format, value.wrappedValue))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 40)
+        }
+    }
+
+    // MARK: - Synthesize Button
+
+    private var synthesizeButton: some View {
+        Button {
+            Task {
+                await synthesize()
+            }
+        } label: {
+            HStack {
+                if cloningViewModel.isSynthesizing {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                } else {
+                    Image(systemName: "speaker.wave.3.fill")
+                }
+                Text(cloningViewModel.isSynthesizing ? "Generating..." : "Generate Speech")
+                    .fontWeight(.semibold)
+            }
+            .frame(maxWidth: .infinity)
+            .padding()
+            .background(
+                selectedSpeakerId != nil && !synthesizeText.isEmpty
+                    ? AnyShapeStyle(
+                        LinearGradient(
+                            colors: [.purple, .pink],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    : AnyShapeStyle(Color.gray)
+            )
+            .foregroundStyle(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .disabled(
+            selectedSpeakerId == nil || synthesizeText.isEmpty || cloningViewModel.isSynthesizing)
+    }
+
+    // MARK: - Audio Player
+
+    private func audioPlayer(url: URL) -> some View {
+        VStack(spacing: 12) {
+            HStack {
+                Image(systemName: "speaker.wave.2.fill")
+                    .foregroundStyle(.purple)
+                Text("Generated Speech")
+                    .font(.headline)
+                Spacer()
+            }
+
+            // Simple audio player controls
+            HStack(spacing: 16) {
+                Button {
+                    // Play audio using AVPlayer
+                    playAudio(url: url)
+                } label: {
+                    Image(systemName: "play.circle.fill")
+                        .font(.title)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    saveAudio(url: url)
+                } label: {
+                    Label("Save", systemImage: "arrow.down.circle")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
+            }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.purple.opacity(0.1))
+            )
+        }
+        .padding()
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+    }
+
+    // MARK: - State
+
+    @State private var clonedSpeakerId: String?
+    private var audioPlayerInstance: AVAudioPlayer?
+
+    // MARK: - Actions
+
+    private func toggleRecording() async {
+        if recorder.isRecording {
+            let audioURL = await recorder.stopRecording()
+            // Keep recording ready for cloning
+        } else {
+            do {
+                try await recorder.startRecording()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func cloneVoice() async {
+        guard let audioURL = await recorder.recordingURL else {
+            errorMessage = "No recording available"
+            return
+        }
+
+        guard await cloningViewModel.isModelLoaded else {
+            errorMessage = "OpenVoice model not loaded. Please download the model first."
+            return
+        }
+
+        let speakerId = UUID().uuidString.prefix(8).lowercased()
+
+        do {
+            cloningViewModel.isCloning = true
+            let response = await cloningViewModel.cloneVoice(
+                from: audioURL, speakerId: String(speakerId))
+
+            if response.success {
+                clonedSpeakerId = String(speakerId)
+                await cloningViewModel.refreshSpeakers()
+            } else {
+                errorMessage = response.message
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        cloningViewModel.isCloning = false
+    }
+
+    private func synthesize() async {
+        guard let speakerId = selectedSpeakerId else {
+            errorMessage = "Please select a cloned voice first"
+            return
+        }
+
+        guard !synthesizeText.isEmpty else {
+            errorMessage = "Please enter text to synthesize"
+            return
+        }
+
+        do {
+            cloningViewModel.isSynthesizing = true
+
+            let audioData = await cloningViewModel.synthesize(
+                text: synthesizeText,
+                speakerId: speakerId,
+                language: selectedLanguage,
+                speed: speechSpeed
+            )
+
+            // Save to temp file
+            let tempDir = FileManager.default.temporaryDirectory
+            let filename = "synthesized_\(UUID().uuidString).wav"
+            let audioURL = tempDir.appendingPathComponent(filename)
+
+            try audioData.write(to: audioURL)
+
+            synthesizedAudioURL = audioURL
+
+            // Auto-play
+            playAudio(url: audioURL)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        cloningViewModel.isSynthesizing = false
+    }
+
+    private func playAudio(url: URL) {
+        do {
+            audioPlayerInstance?.stop()
+            audioPlayerInstance = try AVAudioPlayer(contentsOf: url)
+            audioPlayerInstance?.play()
+        } catch {
+            errorMessage = "Could not play audio: \(error.localizedDescription)"
+        }
+    }
+
+    private func saveAudio(url: URL) {
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.wav]
+        savePanel.nameFieldStringValue = "cloned_speech.wav"
+
+        savePanel.begin { response in
+            if response == .OK, let destURL = savePanel.url {
+                try? FileManager.default.copyItem(at: url, to: destURL)
+            }
+        }
+    }
+
+    private func formatTime(_ time: TimeInterval) -> String {
+        let minutes = Int(time) / 60
+        let seconds = Int(time) % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+// MARK: - ViewModel
+
+@MainActor
+class VoiceCloningViewModel: ObservableObject {
+    @Published private(set) var isServerHealthy = false
+    @Published private(set) var isModelLoaded = false
+    @Published private(set) var speakers: [String] = []
+    @Published(set) var isCloning = false
+    @Published(set) var isSynthesizing = false
+
+    @Published var temperature: Float = 0.7
+    @Published var topP: Float = 0.8
+    @Published var repetitionPenalty: Float = 2.0
+    @Published var minP: Float = 0.05
+    @Published var cfgWeight: Float = 0.0
+    @Published var exaggeration: Float = 0.0
+    @Published var chunkSize: Int = 200
+    @Published var minChunkSeconds: Float = 2.0
+    @Published var chunkRetries: Int = 0
+
+    private let service = VoiceCloningService()
+
+    func checkServerHealth() async {
+        isServerHealthy = await service.checkHealth()
+
+        if isServerHealthy {
+            isModelLoaded = await service.isModelLoaded()
+            await refreshSpeakers()
+        } else {
+            // Try to start the server if not running
+            await startServerIfNeeded()
+        }
+    }
+
+    private func startServerIfNeeded() async {
+        // Check if server can be started
+        let scriptPath =
+            Bundle.main.path(forResource: "start_openvoice_server", ofType: "sh")
+            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .deletingLastPathComponent()
+            .appendingPathComponent("EchoCorePro")
+            .appendingPathComponent("Scripts")
+            .appendingPathComponent("start_server.sh")
+            .path
+
+        guard let scriptPath = scriptPath, FileManager.default.fileExists(atPath: scriptPath) else {
+            return
+        }
+
+        // Start the server in background
+        do {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [scriptPath]
+            try process.run()
+            OSLogManager.shared.log("Started OpenVoice server", category: .inference, level: .info)
+
+            // Wait a moment for server to start
+            try await Task.sleep(nanoseconds: 2_000_000_000)  // 2 seconds
+
+            // Check again
+            isServerHealthy = await service.checkHealth()
+            if isServerHealthy {
+                isModelLoaded = await service.isModelLoaded()
+                await refreshSpeakers()
+            }
+        } catch {
+            OSLogManager.shared.log(
+                "Failed to start OpenVoice server: \(error)", category: .inference, level: .error)
+        }
+    }
+
+    func refreshSpeakers() async {
+        do {
+            speakers = try await service.listSpeakers()
+        } catch {
+            speakers = []
+        }
+    }
+
+    func deleteSpeaker(_ id: String) async {
+        try? await service.deleteSpeaker(id)
+        await refreshSpeakers()
+    }
+
+    func cloneVoice(from url: URL, speakerId: String) async -> VoiceCloningService.CloneResponse {
+        do {
+            return try await service.cloneVoice(from: url, speakerId: speakerId)
+        } catch {
+            return VoiceCloningService.CloneResponse(
+                speakerId: speakerId,
+                durationSeconds: 0,
+                success: false,
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    func synthesize(text: String, speakerId: String, language: String, speed: Float) async -> Data {
+        do {
+            return try await service.synthesize(
+                text: text,
+                speakerId: speakerId,
+                language: language,
+                speed: speed,
+                temperature: temperature,
+                topP: topP,
+                repetitionPenalty: repetitionPenalty,
+                minP: minP,
+                cfgWeight: cfgWeight,
+                exaggeration: exaggeration,
+                chunkSize: chunkSize,
+                minChunkSeconds: minChunkSeconds,
+                chunkRetries: chunkRetries
+            )
+        } catch {
+            return Data()
+        }
+    }
+}
+
+// MARK: - File Type UTType
+
+extension UTType {
+    static let wav = UTType(filenameExtension: "wav")!
+}
+
+#Preview {
+    VoiceCloningView()
+        .frame(width: 900, height: 600)
+}

@@ -1,0 +1,993 @@
+//
+//  VoiceCloningView.swift
+//  EchoCorePro
+//
+//  Voice cloning interface using OpenVoice for TTS with custom voices
+//
+
+import AVFoundation
+import SwiftUI
+import AppKit
+
+struct VoiceCloningView: View {
+    @StateObject private var viewModel = VoiceCloningViewModel()
+    @State private var selectedTab: VoiceCloningTab = .clone
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            // Main content area
+            VStack(spacing: 0) {
+                headerBar
+                
+                TabView(selection: $selectedTab) {
+                    cloneVoiceTab
+                        .tabItem { Label("Clone Voice", systemImage: "waveform.circle") }
+                        .tag(VoiceCloningTab.clone)
+                    
+                    synthesizeTab
+                        .tabItem { Label("Synthesize", systemImage: "speaker.wave.3") }
+                        .tag(VoiceCloningTab.synthesize)
+                    
+                    manageVoicesTab
+                        .tabItem { Label("Manage", systemImage: "person.2") }
+                        .tag(VoiceCloningTab.manage)
+                }
+                .padding()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            
+            // Server status sidebar
+            serverStatusSidebar
+                .frame(width: 280)
+        }
+        .background(
+            LinearGradient(
+                colors: [Color(white: 0.05), Color(white: 0.08), Color(white: 0.05)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .task {
+            await viewModel.initialize()
+        }
+        .alert("Error", isPresented: .init(
+            get: { viewModel.errorMessage != nil },
+            set: { if !$0 { viewModel.errorMessage = nil } }
+        )) {
+            Button("OK") { viewModel.errorMessage = nil }
+        } message: {
+            Text(viewModel.errorMessage ?? "An error occurred")
+        }
+    }
+    
+    // MARK: - Header Bar
+    
+    private var headerBar: some View {
+        HStack {
+            HStack(spacing: 8) {
+                Image(systemName: "person.wave.2.fill")
+                    .font(.title2)
+                    .foregroundStyle(.blue)
+                
+                Text("Voice Cloning")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+            }
+            
+            Spacer()
+            
+            // Server status indicator
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(viewModel.isServerHealthy ? .green : .red)
+                    .frame(width: 8, height: 8)
+                    .shadow(color: viewModel.isServerHealthy ? .green.opacity(0.6) : .red.opacity(0.6), radius: 4)
+                
+                Text(viewModel.isServerHealthy ? "Server Online" : "Server Offline")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial)
+            .clipShape(Capsule())
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+    }
+    
+    // MARK: - Clone Voice Tab
+    
+    private var cloneVoiceTab: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // Instructions
+                instructionCard(
+                    icon: "info.circle.fill",
+                    title: "Clone a Voice",
+                    description: "Upload a 6+ second audio sample (WAV format) to create a custom voice profile for text-to-speech synthesis.",
+                    color: .blue
+                )
+                
+                // Audio file selection
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Reference Audio")
+                        .font(.headline)
+                    
+                    if let audioURL = viewModel.selectedAudioURL {
+                        HStack {
+                            Image(systemName: "waveform")
+                                .foregroundStyle(.blue)
+                            
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(audioURL.lastPathComponent)
+                                    .font(.subheadline)
+                                    .lineLimit(1)
+                                
+                                if let duration = viewModel.audioDuration {
+                                    Text(String(format: "Duration: %.1f seconds", duration))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            
+                            Spacer()
+                            
+                            Button {
+                                viewModel.selectedAudioURL = nil
+                                viewModel.audioDuration = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding()
+                        .background(Color(white: 0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    } else {
+                        Button {
+                            viewModel.selectAudioFile()
+                        } label: {
+                            HStack {
+                                Image(systemName: "plus.circle.fill")
+                                Text("Select Audio File")
+                                    .fontWeight(.medium)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.blue.opacity(0.2))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding()
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                
+                // Speaker ID input
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Voice Profile Name")
+                        .font(.headline)
+                    
+                    TextField("Enter a unique name (e.g., 'john_narrator')", text: $viewModel.speakerId)
+                        .textFieldStyle(.plain)
+                        .padding()
+                        .background(Color(white: 0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    
+                    Text("Use lowercase letters, numbers, and underscores only")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                
+                // Clone button
+                Button {
+                    Task { await viewModel.cloneVoice() }
+                } label: {
+                    HStack {
+                        if viewModel.isCloning {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "waveform.circle.fill")
+                        }
+                        
+                        Text(viewModel.isCloning ? "Cloning Voice..." : "Clone Voice")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: viewModel.canClone ? [.blue, .purple] : [.gray, .gray.opacity(0.8)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+                .disabled(!viewModel.canClone)
+                
+                // Success message
+                if let successMessage = viewModel.cloneSuccessMessage {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text(successMessage)
+                            .font(.subheadline)
+                    }
+                    .padding()
+                    .background(Color.green.opacity(0.2))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            .padding()
+        }
+    }
+    
+    // MARK: - Synthesize Tab
+    
+    private var synthesizeTab: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // Instructions
+                instructionCard(
+                    icon: "speaker.wave.3.fill",
+                    title: "Synthesize Speech",
+                    description: "Convert text to speech using your cloned voices with adjustable speed and language settings.",
+                    color: .purple
+                )
+                
+                // Voice selector
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Select Voice")
+                        .font(.headline)
+                    
+                    if viewModel.availableSpeakers.isEmpty {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                            Text("No voices available. Clone a voice first.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding()
+                        .background(Color.yellow.opacity(0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    } else {
+                        Picker("Voice", selection: $viewModel.selectedSpeakerForSynthesis) {
+                            Text("Select a voice").tag(String?.none)
+                            ForEach(viewModel.availableSpeakers, id: \.self) { speaker in
+                                HStack {
+                                    Image(systemName: "person.circle.fill")
+                                    Text(speaker)
+                                }
+                                .tag(String?.some(speaker))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .padding()
+                        .background(Color(white: 0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+                .padding()
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                
+                // Text input
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Text to Synthesize")
+                        .font(.headline)
+                    
+                    TextEditor(text: $viewModel.textToSynthesize)
+                        .font(.body)
+                        .frame(minHeight: 120)
+                        .padding(8)
+                        .background(Color(white: 0.1))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .scrollContentBackground(.hidden)
+                    
+                    Text("\(viewModel.textToSynthesize.count) characters")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                
+                // Synthesis settings
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Settings")
+                        .font(.headline)
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Speech Speed")
+                                .font(.subheadline)
+                            Spacer()
+                            Text(String(format: "%.1fx", viewModel.speechSpeed))
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+                                .foregroundStyle(.blue)
+                        }
+                        
+                        Slider(value: $viewModel.speechSpeed, in: 0.5...2.0, step: 0.1)
+                            .tint(.blue)
+                    }
+                    
+                    Divider()
+                    
+                    HStack {
+                        Text("Language")
+                            .font(.subheadline)
+                        Spacer()
+                        Picker("Language", selection: $viewModel.language) {
+                            Text("🇬🇧 English").tag("en")
+                            Text("🇮🇹 Italian").tag("it")
+                            Text("🇪🇸 Spanish").tag("es")
+                            Text("🇨🇳 Chinese").tag("zh")
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+                .padding()
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                
+                // Synthesize button
+                Button {
+                    Task { await viewModel.synthesizeSpeech() }
+                } label: {
+                    HStack {
+                        if viewModel.isSynthesizing {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                        } else {
+                            Image(systemName: "waveform")
+                        }
+                        
+                        Text(viewModel.isSynthesizing ? "Synthesizing..." : "Synthesize Speech")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(
+                        LinearGradient(
+                            colors: viewModel.canSynthesize ? [.purple, .pink] : [.gray, .gray.opacity(0.8)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+                .disabled(!viewModel.canSynthesize)
+                
+                // Playback controls
+                if viewModel.synthesizedAudioData != nil {
+                    VStack(spacing: 12) {
+                        HStack {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("Speech synthesized successfully")
+                                .font(.subheadline)
+                        }
+                        
+                        HStack(spacing: 16) {
+                            Button {
+                                viewModel.playAudio()
+                            } label: {
+                                HStack {
+                                    Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                                    Text(viewModel.isPlaying ? "Pause" : "Play")
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.blue)
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                            }
+                            .buttonStyle(.plain)
+                            
+                            Button {
+                                viewModel.saveAudioFile()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "square.and.arrow.down")
+                                    Text("Save")
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding()
+                                .background(Color.green)
+                                .foregroundStyle(.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 10))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding()
+                    .background(Color.green.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                }
+            }
+            .padding()
+        }
+    }
+    
+    // MARK: - Manage Voices Tab
+    
+    private var manageVoicesTab: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                // Instructions
+                instructionCard(
+                    icon: "person.2.fill",
+                    title: "Manage Voices",
+                    description: "View and delete your cloned voice profiles.",
+                    color: .orange
+                )
+                
+                // Refresh button
+                HStack {
+                    Spacer()
+                    Button {
+                        Task { await viewModel.refreshSpeakers() }
+                    } label: {
+                        HStack {
+                            Image(systemName: "arrow.clockwise")
+                            Text("Refresh")
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.blue.opacity(0.2))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                // Speaker list
+                if viewModel.isLoadingSpeakers {
+                    HStack {
+                        ProgressView()
+                        Text("Loading voices...")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding()
+                } else if viewModel.availableSpeakers.isEmpty {
+                    VStack(spacing: 16) {
+                        Image(systemName: "person.slash")
+                            .font(.system(size: 48))
+                            .foregroundStyle(.secondary)
+                        Text("No Cloned Voices")
+                            .font(.headline)
+                        Text("Clone a voice using the Clone Voice tab")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(40)
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                } else {
+                    VStack(spacing: 12) {
+                        ForEach(viewModel.availableSpeakers, id: \.self) { speaker in
+                            speakerCard(speaker: speaker)
+                        }
+                    }
+                }
+            }
+            .padding()
+        }
+    }
+    
+    private func speakerCard(speaker: String) -> some View {
+        HStack {
+            Image(systemName: "person.circle.fill")
+                .font(.title)
+                .foregroundStyle(.blue)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(speaker)
+                    .font(.headline)
+                Text("Cloned voice profile")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
+            
+            Button {
+                Task { await viewModel.deleteSpeaker(speaker) }
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Delete voice profile")
+        }
+        .padding()
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+    
+    // MARK: - Server Status Sidebar
+    
+    private var serverStatusSidebar: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Server Status")
+                .font(.headline)
+            
+            // Server health
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Circle()
+                        .fill(viewModel.isServerHealthy ? .green : .red)
+                        .frame(width: 12, height: 12)
+                    Text("OpenVoice Server")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                }
+                
+                Text(viewModel.isServerHealthy ? "Connected" : "Disconnected")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .background(Color(white: 0.1))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            
+            // Model status
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: viewModel.isModelLoaded ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(viewModel.isModelLoaded ? .green : .secondary)
+                    Text("Model Status")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                }
+                
+                Text(viewModel.isModelLoaded ? "Loaded" : "Not Loaded")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .background(Color(white: 0.1))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            
+            // Speaker count
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "person.2.fill")
+                        .foregroundStyle(.blue)
+                    Text("Cloned Voices")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                }
+                
+                Text("\(viewModel.availableSpeakers.count) voice\(viewModel.availableSpeakers.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding()
+            .background(Color(white: 0.1))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            
+            Divider()
+            
+            // Server controls
+            if viewModel.isServerHealthy {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Server Controls")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                    
+                    Button {
+                        viewModel.stopServer()
+                    } label: {
+                        HStack {
+                            Image(systemName: "stop.circle.fill")
+                            Text("Stop Server")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.red.opacity(0.2))
+                        .foregroundStyle(.red)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding()
+                .background(Color(white: 0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            
+            Divider()
+            
+            // Setup instructions
+            if !viewModel.isServerHealthy {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Setup Required")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.orange)
+                    
+                    Text("The OpenVoice server is offline")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    Button {
+                        viewModel.startServer()
+                    } label: {
+                        HStack {
+                            Image(systemName: "play.circle.fill")
+                            Text("Start Server")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.blue)
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Divider()
+                    
+                    Text("Manual start:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    Text("python Scripts/openvoice_server.py")
+                        .font(.system(.caption, design: .monospaced))
+                        .padding(8)
+                        .background(Color(white: 0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .padding()
+                .background(Color.orange.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            
+            Spacer()
+        }
+        .padding()
+        .background(Color(white: 0.1))
+    }
+    
+    // MARK: - Helper Views
+    
+    private func instructionCard(icon: String, title: String, description: String, color: Color) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: icon)
+                .font(.title)
+                .foregroundStyle(color)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                Text(description)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(color.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+// MARK: - Tab Enum
+
+enum VoiceCloningTab: String, CaseIterable {
+    case clone = "Clone"
+    case synthesize = "Synthesize"
+    case manage = "Manage"
+}
+
+// MARK: - View Model
+
+@MainActor
+class VoiceCloningViewModel: ObservableObject {
+    // Service
+    private let service = VoiceCloningService()
+    
+    // Server status
+    @Published var isServerHealthy = false
+    @Published var isModelLoaded = false
+    
+    // Clone voice
+    @Published var selectedAudioURL: URL?
+    @Published var audioDuration: TimeInterval?
+    @Published var speakerId = ""
+    @Published var isCloning = false
+    @Published var cloneSuccessMessage: String?
+    
+    // Synthesize speech
+    @Published var availableSpeakers: [String] = []
+    @Published var selectedSpeakerForSynthesis: String?
+    @Published var textToSynthesize = ""
+    @Published var language = "en"
+    @Published var speechSpeed: Float = 1.0
+    @Published var isSynthesizing = false
+    @Published var synthesizedAudioData: Data?
+    @Published var isPlaying = false
+    
+    // Manage
+    @Published var isLoadingSpeakers = false
+    
+    // Errors
+    @Published var errorMessage: String?
+    
+    // Audio player
+    private var audioPlayer: Process?
+    
+    var canClone: Bool {
+        selectedAudioURL != nil && !speakerId.isEmpty && !isCloning && isServerHealthy
+    }
+    
+    var canSynthesize: Bool {
+        selectedSpeakerForSynthesis != nil && !textToSynthesize.isEmpty && !isSynthesizing && isServerHealthy
+    }
+    
+    func initialize() async {
+        // Configure audio session for playback
+        setupAudioSession()
+        
+        await checkServerHealth()
+        await refreshSpeakers()
+    }
+    
+    private func setupAudioSession() {
+        #if os(macOS)
+        // macOS doesn't need AVAudioSession
+        #else
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("⚠️ Audio session setup failed: \(error)")
+        }
+        #endif
+    }
+    
+    func checkServerHealth() async {
+        isServerHealthy = await service.checkHealth()
+        isModelLoaded = await service.isModelLoaded()
+    }
+    
+    func selectAudioFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.wav, .audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            selectedAudioURL = url
+            
+            // Get audio duration
+            let asset = AVAsset(url: url)
+            audioDuration = asset.duration.seconds
+            
+            cloneSuccessMessage = nil
+        }
+    }
+    
+    func cloneVoice() async {
+        guard let audioURL = selectedAudioURL else { return }
+        
+        isCloning = true
+        cloneSuccessMessage = nil
+        errorMessage = nil
+        
+        do {
+            let response = try await service.cloneVoice(from: audioURL, speakerId: speakerId)
+            
+            if response.success {
+                cloneSuccessMessage = response.message
+                
+                // Clear form
+                selectedAudioURL = nil
+                audioDuration = nil
+                speakerId = ""
+                
+                // Refresh speaker list
+                await refreshSpeakers()
+            } else {
+                errorMessage = response.message
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        
+        isCloning = false
+    }
+    
+    func refreshSpeakers() async {
+        isLoadingSpeakers = true
+        
+        do {
+            let speakers = try await service.listSpeakers()
+            availableSpeakers = speakers.sorted()
+        } catch {
+            errorMessage = error.localizedDescription
+            availableSpeakers = []
+        }
+        
+        isLoadingSpeakers = false
+    }
+    
+    func synthesizeSpeech() async {
+        guard let speaker = selectedSpeakerForSynthesis else { return }
+        
+        isSynthesizing = true
+        synthesizedAudioData = nil
+        errorMessage = nil
+        
+        do {
+            print("🎤 Requesting synthesis for '\(textToSynthesize)' with speaker '\(speaker)'")
+            
+            let audioData = try await service.synthesize(
+                text: textToSynthesize,
+                speakerId: speaker,
+                language: language,
+                speed: speechSpeed
+            )
+            
+            print("✅ Received audio data: \(audioData.count) bytes")
+            synthesizedAudioData = audioData
+            
+        } catch {
+            print("❌ Synthesis error: \(error)")
+            errorMessage = error.localizedDescription
+        }
+        
+        isSynthesizing = false
+    }
+    
+    func playAudio() {
+        guard let data = synthesizedAudioData else { return }
+        
+        if isPlaying {
+            audioPlayer?.terminate()
+            isPlaying = false
+            return
+        }
+        
+        // Save to temporary file
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("echocore_audio.wav")
+        
+        do {
+            try data.write(to: tempURL)
+            print("💾 Saved audio to: \(tempURL.path)")
+            print("📊 Audio file size: \(data.count) bytes")
+            
+            // Use afplay command (most reliable on macOS)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+            process.arguments = [tempURL.path]
+            
+            process.terminationHandler = { [weak self] _ in
+                Task { @MainActor in
+                    self?.isPlaying = false
+                    print("✅ Audio finished")
+                }
+            }
+            
+            try process.run()
+            audioPlayer = process
+            isPlaying = true
+            print("✅ Audio playing with afplay!")
+            
+        } catch {
+            print("❌ Audio error: \(error)")
+            errorMessage = "Failed to play audio: \(error.localizedDescription)"
+        }
+    }
+    
+    func saveAudioFile() {
+        guard let data = synthesizedAudioData else { return }
+        
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.wav]
+        panel.nameFieldStringValue = "synthesized_speech.wav"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try data.write(to: url)
+            } catch {
+                errorMessage = "Failed to save audio: \(error.localizedDescription)"
+            }
+        }
+    }
+    
+    func deleteSpeaker(_ speakerId: String) async {
+        do {
+            try await service.deleteSpeaker(speakerId)
+            await refreshSpeakers()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+    
+    func startServer() {
+        // Get the project directory
+        guard let projectURL = Bundle.main.resourceURL?.deletingLastPathComponent().deletingLastPathComponent() else {
+            errorMessage = "Could not find project directory"
+            return
+        }
+        
+        let scriptPath = projectURL.appendingPathComponent("Scripts/openvoice_server.py").path
+        let venvPath = projectURL.appendingPathComponent("venv/bin/python").path
+        
+        // Check if script exists
+        guard FileManager.default.fileExists(atPath: scriptPath) else {
+            errorMessage = "Server script not found at: \(scriptPath)"
+            return
+        }
+        
+        // Determine which Python to use
+        let pythonPath = FileManager.default.fileExists(atPath: venvPath) ? venvPath : "/usr/bin/python3"
+        
+        // Create process
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pythonPath)
+        process.arguments = [scriptPath]
+        process.currentDirectoryURL = projectURL
+        
+        // Redirect output to console
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        
+        do {
+            try process.run()
+            
+            // Wait a moment for server to start
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+                await checkServerHealth()
+            }
+        } catch {
+            errorMessage = "Failed to start server: \(error.localizedDescription)"
+        }
+    }
+    
+    func stopServer() {
+        Task {
+            do {
+                // Try to gracefully stop the server via API
+                var request = URLRequest(url: URL(string: "http://127.0.0.1:8765/shutdown")!)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 2
+                
+                let (_, _) = try await URLSession.shared.data(for: request)
+                
+                // Wait a moment and check health
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await checkServerHealth()
+            } catch {
+                // If graceful shutdown fails, kill the process
+                let task = Process()
+                task.launchPath = "/usr/bin/killall"
+                task.arguments = ["-9", "Python"]
+                try? task.run()
+                
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await checkServerHealth()
+            }
+        }
+    }
+}
+
+#Preview {
+    VoiceCloningView()
+        .frame(width: 1100, height: 700)
+}

@@ -1,0 +1,17 @@
+.DS_Store
+DerivedData/
+build.log
+build_standard.log
+firebase-debug.log
+venv/
+.serena/
+.vscode/
+CompiledApp/
+Build/
+.build/
+.swiftpm/
+checkpoints/
+*.pth
+*.mdb
+*.wav
+EchoCorePro.app/

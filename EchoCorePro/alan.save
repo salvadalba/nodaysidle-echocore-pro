@@ -1,0 +1,58 @@
+def synthesize_audio(text, speaker_embedding, language='en', speed=1.0):
+    """Synthesize speech - improved version"""
+    try:
+        # Try pyttsx3 first
+        import pyttsx3
+        
+        logger.info(f"🎙️  Attempting pyttsx3 synthesis for: '{text[:50]}...'")
+        
+        engine = pyttsx3.init('nsss')  # Force macOS NSSpeechSynthesizer
+        
+        # Configure engine
+        rate = engine.getProperty('rate')
+        engine.setProperty('rate', int(rate * speed))
+        
+        # Set volume to max
+        engine.setProperty('volume', 1.0)
+        
+        # Get available voices
+        voices = engine.getProperty('voices')
+        if voices and len(voices) > 0:
+            # Try to pick a voice based on language
+            for voice in voices:
+                if language == 'it' and 'italian' in voice.name.lower():
+                    engine.setProperty('voice', voice.id)
+                    break
+                elif language == 'en' and 'english' in voice.name.lower():
+                    engine.setProperty('voice', voice.id)
+                    break
+        
+        # Generate to file
+        output_file = tempfile.mktemp(suffix='.aiff')
+        engine.save_to_file(text, output_file)
+        engine.runAndWait()
+        
+        # Convert AIFF to WAV using soundfile
+        import soundfile as sf
+        audio_data, sample_rate = sf.read(output_file)
+        
+        wav_file = tempfile.mktemp(suffix='.wav')
+        sf.write(wav_file, audio_data, sample_rate, subtype='PCM_16')
+        
+        # Clean up AIFF
+        os.unlink(output_file)
+        
+        # Check file size
+        file_size = os.path.getsize(wav_file)
+        logger.info(f"✅ Generated WAV: {file_size} bytes ({file_size/1024:.1f} KB)")
+        
+        if file_size < 10000:  # Less than 10KB is suspicious
+            logger.warning(f"⚠️  File seems too small, using fallback")
+            os.unlink(wav_file)
+            return generate_tone_audio(text, speaker_embedding, speed)
+        
+        return wav_file
+        
+    except Exception as e:
+        logger.warning(f"⚠️  pyttsx3 failed: {e}, using fallback")
+        return generate_tone_audio(text, speaker_embedding, speed)
